@@ -59,7 +59,7 @@ function app() {
   const tabs = ["dashboard", "queue", "walkins", "appointments", "customers", "services", "barbers", "hours"];
   return `
     <header class="topbar">
-      <div class="brand"><img src="/assets/logo.png" alt="ProStyle logo" />ProStyle Admin</div>
+      <div class="brand"><img src="./assets/logo.png" alt="ProStyle logo" />ProStyle Admin</div>
       <div class="topbar-actions"><button class="btn secondary" data-refresh>Refresh</button><button class="btn secondary" data-logout>Log out</button></div>
     </header>
     <main class="shell">
@@ -72,7 +72,7 @@ function loginScreen(message = "") {
   return `
     <main class="login-shell">
       <form class="login-box" id="login-form">
-        <img src="/assets/logo.png" alt="ProStyle logo" />
+        <img src="./assets/logo.png" alt="ProStyle logo" />
         <h1>Admin Login</h1>
         <p>Enter the owner/admin credentials to manage appointments, barbers, and shop data.</p>
         <label for="admin-username">Username</label>
