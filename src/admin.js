@@ -1,14 +1,21 @@
 import "./admin.css";
 
-const API_BASE = "http://127.0.0.1:8787/api";
-let state = { barbers: [], services: [], addons: [], hours: [], walkins: [], appointments: [], customers: [] };
+const API_BASE = window.PROSTYLE_API_BASE || "https://laudable-bass-943.convex.site/api";
+let state = { barbers: [], services: [], addons: [], hours: [], walkins: [], appointments: [], customers: [], notifications: [] };
 let tab = "dashboard";
+let authToken = localStorage.getItem("prostyleAdminToken") || "";
+let rescheduleOpenId = "";
 
 async function api(path, options) {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}) },
     ...options
   });
+  if (response.status === 401) {
+    authToken = "";
+    localStorage.removeItem("prostyleAdminToken");
+    throw new Error("AUTH");
+  }
   if (!response.ok) throw new Error(`API ${response.status}`);
   return response.json();
 }
@@ -40,7 +47,7 @@ function barberById(barberId) {
 
 function combinedQueue() {
   const walkins = state.walkins
-    .filter((item) => item.status !== "Done")
+    .filter((item) => ["Waiting", "In chair"].includes(item.status))
     .map((item) => ({ ...item, collection: "walkins", type: "Walk-in", enteredAt: item.createdAt || 0 }));
   const appointments = state.appointments
     .filter((item) => ["Checked in", "In chair"].includes(item.status))
@@ -53,7 +60,7 @@ function app() {
   return `
     <header class="topbar">
       <div class="brand"><img src="/assets/logo.png" alt="ProStyle logo" />ProStyle Admin</div>
-      <button class="btn secondary" data-refresh>Refresh</button>
+      <div class="topbar-actions"><button class="btn secondary" data-refresh>Refresh</button><button class="btn secondary" data-logout>Log out</button></div>
     </header>
     <main class="shell">
       <aside class="menu">${tabs.map((item) => `<button class="${tab === item ? "active" : ""}" data-tab="${item}">${title(item)}</button>`).join("")}</aside>
@@ -61,8 +68,57 @@ function app() {
     </main>`;
 }
 
+function loginScreen(message = "") {
+  return `
+    <main class="login-shell">
+      <form class="login-box" id="login-form">
+        <img src="/assets/logo.png" alt="ProStyle logo" />
+        <h1>Admin Login</h1>
+        <p>Enter the owner/admin credentials to manage appointments, barbers, and shop data.</p>
+        <label for="admin-username">Username</label>
+        <input id="admin-username" name="username" autocomplete="username" required />
+        <label for="admin-password">Password</label>
+        <input id="admin-password" name="password" type="password" autocomplete="current-password" required />
+        <button class="btn" type="submit">Log in</button>
+        ${message ? `<p class="notice">${message}</p>` : `<p class="hint">Use the owner/admin username and password.</p>`}
+      </form>
+    </main>`;
+}
+
 function title(value) {
   return value.replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+function todayAppointmentLabel() {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }).format(new Date());
+}
+
+function todayDateKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function appointmentDateText(item) {
+  if (item.dateLabel) return item.dateLabel;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(item.date || "")) {
+    return new Intl.DateTimeFormat("en-US", {
+      weekday: "long",
+      month: "long",
+      day: "numeric"
+    }).format(new Date(`${item.date}T12:00:00`));
+  }
+  return item.date || "";
+}
+
+function dateLabelFromKey(dateKey) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric"
+  }).format(new Date(`${dateKey}T12:00:00`));
 }
 
 function panel() {
@@ -78,18 +134,31 @@ function panel() {
 
 function dashboard() {
   const waiting = combinedQueue().length;
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayAppointmentLabel();
+  const unread = (state.notifications || []).filter((item) => !item.read).length;
   return `
     <div class="grid four">
       <div class="stat"><span>In-store queue</span><strong>${waiting}</strong></div>
       <div class="stat"><span>Appointments</span><strong>${state.appointments.length}</strong></div>
       <div class="stat"><span>Customers</span><strong>${state.customers.length}</strong></div>
-      <div class="stat"><span>Services</span><strong>${state.services.length}</strong></div>
+      <div class="stat"><span>Owner alerts</span><strong>${unread}</strong></div>
     </div>
-    <div class="grid two">
+    <div class="grid dashboard-panels">
+      <section class="panel"><h2>Owner notifications</h2>${notifications()}</section>
       <section class="panel"><h2>Queue</h2>${queuePanel()}</section>
-      <section class="panel"><h2>Today</h2>${appointments(false, state.appointments.filter((item) => item.date === today))}</section>
+      <section class="panel"><h2>Today</h2>${appointments(false, state.appointments.filter((item) => item.date === today || item.date === todayDateKey() || item.dateLabel === today))}</section>
     </div>`;
+}
+
+function notifications() {
+  const items = (state.notifications || []).filter((item) => !item.read);
+  if (!items.length) return `<p>No unread notifications.</p>`;
+  return `<div class="notification-list">${items.slice(0, 8).map((item) => `
+    <div class="notification">
+      <span class="type-badge">${item.kind || "info"}</span>
+      <p>${item.message}</p>
+      <button class="btn secondary" data-notification-read="${item.id}">Mark read</button>
+    </div>`).join("")}</div>`;
 }
 
 function queuePanel() {
@@ -136,12 +205,75 @@ function appointments(editable, items = state.appointments) {
     <tr>
       <td>${item.name}</td>
       <td>${item.phone}</td>
-      <td>${item.date}<br />${item.time}</td>
+      <td>${appointmentDateText(item)}<br />${item.time}</td>
       <td>${serviceById(item.serviceId).name}</td>
       <td>${barberById(item.barberId).name}</td>
       <td>${item.status}</td>
-      ${editable ? `<td><div class="actions"><button class="btn" data-check="${item.id}">Check in</button><button class="btn danger" data-remove="appointments:${item.id}">Cancel</button></div></td>` : ""}
-    </tr>`).join("")}</tbody></table></div>`;
+      ${editable ? `<td><div class="actions"><button class="btn" data-check="${item.id}">Check in</button><button class="btn secondary" data-reschedule="${item.id}">Reschedule</button><button class="btn danger" data-remove="appointments:${item.id}">Cancel</button></div></td>` : ""}
+    </tr>
+    ${editable && rescheduleOpenId === item.id ? reschedulePanel(item) : ""}`).join("")}</tbody></table></div>`;
+}
+
+function reschedulePanel(item) {
+  const currentDate = /^\d{4}-\d{2}-\d{2}$/.test(item.date || "") ? item.date : new Date().toISOString().slice(0, 10);
+  const dates = upcomingOpenDates(currentDate);
+  return `
+    <tr class="reschedule-row">
+      <td colspan="7">
+        <form class="reschedule-panel" data-reschedule-form="${item.id}">
+          <div>
+            <span class="type-badge">Reschedule</span>
+            <h3>${item.name}</h3>
+            <p>${item.phone} · ${serviceById(item.serviceId).name}</p>
+          </div>
+          <div class="reschedule-calendar">
+            ${dates.map((date) => `<button type="button" class="${date.key === currentDate ? "active" : ""}" data-calendar-date="${date.key}">${date.weekday}<small>${date.label}</small></button>`).join("")}
+          </div>
+          <div class="grid three">
+            <div class="field"><label>Date</label><input name="date" type="date" value="${currentDate}" required /></div>
+            <div class="field"><label>Time</label><input name="time" value="${item.time || "10:00 AM"}" required /></div>
+            <div class="field"><label>Barber</label><select name="barberId" required>${barberOptionsForDate(currentDate, item.barberId)}</select></div>
+          </div>
+          <div class="actions">
+            <button class="btn" type="submit">Save reschedule</button>
+            <button class="btn secondary" type="button" data-reschedule-cancel>Cancel</button>
+          </div>
+        </form>
+      </td>
+    </tr>`;
+}
+
+function upcomingOpenDates(selectedDate) {
+  const dates = [];
+  const start = new Date(`${selectedDate}T12:00:00`);
+  if (Number.isNaN(start.getTime())) start.setTime(Date.now());
+
+  for (let offset = 0; dates.length < 14; offset += 1) {
+    const date = new Date();
+    date.setDate(date.getDate() + offset);
+    if ([0, 1].includes(date.getDay())) continue;
+    dates.push({
+      key: date.toISOString().slice(0, 10),
+      weekday: new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(date),
+      label: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(date)
+    });
+  }
+
+  if (!dates.some((date) => date.key === selectedDate)) {
+    dates.unshift({
+      key: selectedDate,
+      weekday: new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(start),
+      label: new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(start)
+    });
+  }
+
+  return dates;
+}
+
+function barberOptionsForDate(dateKey, selectedBarberId = "") {
+  const available = state.barbers.filter((barber) => isBarberAvailableForDate(barber, dateKey));
+  if (!available.length) return `<option value="">No barbers available</option>`;
+  return available.map((barber) => `<option value="${barber.id}" ${barber.id === selectedBarberId ? "selected" : ""}>${barber.name}</option>`).join("");
 }
 
 function customers() {
@@ -183,8 +315,29 @@ function services() {
 function barbers() {
   return `
     <form id="barber-form" class="form-box grid two"><div class="field"><label>Name</label><input name="name" required /></div><button class="btn" type="submit">Add barber</button></form>
-    <div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Rename</th><th></th></tr></thead><tbody>${state.barbers.map((item) => `
-      <tr><td>${item.name}</td><td>${item.active ? "Active" : "Hidden"}</td><td><input value="${item.name}" data-field="barbers:${item.id}:name" /></td><td><button class="btn" data-toggle="${item.id}">${item.active ? "Hide" : "Show"}</button></td></tr>`).join("")}</tbody></table></div>`;
+    <p class="notice">Set a barber to N/A indefinitely or for selected dates. The public booking lists will hide that barber, walk-ins will be removed from the active waitlist, and appointments in that range will be flagged for reschedule.</p>
+    <div class="table-wrap"><table><thead><tr><th>Barber name</th><th>Status</th><th>Dates</th><th>Reason</th><th></th></tr></thead><tbody>${state.barbers.map((item) => barberRow(item)).join("")}</tbody></table></div>`;
+}
+
+function barberRow(item) {
+  const mode = item.unavailableMode || (item.active ? "active" : "indefinite");
+  return `
+    <tr>
+      <td><input value="${item.name}" data-field="barbers:${item.id}:name" aria-label="Barber name" /></td>
+      <td>
+        <select data-barber-mode="${item.id}">
+          <option value="active" ${mode === "active" ? "selected" : ""}>Active</option>
+          <option value="range" ${mode === "range" ? "selected" : ""}>N/A for dates</option>
+          <option value="indefinite" ${mode === "indefinite" ? "selected" : ""}>N/A indefinitely</option>
+        </select>
+      </td>
+      <td class="date-range">
+        <input type="date" value="${item.unavailableFrom || ""}" data-field="barbers:${item.id}:unavailableFrom" aria-label="Unavailable start date" />
+        <input type="date" value="${item.unavailableTo || ""}" data-field="barbers:${item.id}:unavailableTo" aria-label="Unavailable end date" />
+      </td>
+      <td><input value="${item.unavailableReason || ""}" data-field="barbers:${item.id}:unavailableReason" placeholder="Vacation, sick, personal..." /></td>
+      <td><button class="btn" data-toggle="${item.id}">${mode === "active" ? "Set N/A" : "Set active"}</button></td>
+    </tr>`;
 }
 
 function hours() {
@@ -199,17 +352,28 @@ function values(form) {
 }
 
 async function render() {
+  if (!authToken) {
+    document.querySelector("#app").innerHTML = loginScreen();
+    bindLogin();
+    return;
+  }
   try {
     await load();
     document.querySelector("#app").innerHTML = app();
     bind();
   } catch (error) {
-    document.querySelector("#app").innerHTML = `<main class="content"><h1>Backend is not running</h1><p>Start it with <code>npm run server</code> inside <code>prostyle-admin</code>.</p></main>`;
+    if (error.message === "AUTH") {
+      document.querySelector("#app").innerHTML = loginScreen("Please log in again.");
+      bindLogin();
+      return;
+    }
+    document.querySelector("#app").innerHTML = `<main class="content"><h1>Booking system unavailable</h1><p>Could not reach the Convex booking API. Check the deployment URL and try again.</p></main>`;
   }
 }
 
 function bind() {
   document.querySelector("[data-refresh]")?.addEventListener("click", render);
+  document.querySelector("[data-logout]")?.addEventListener("click", logout);
   document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { tab = button.dataset.tab; render(); }));
   document.querySelector("#service-form")?.addEventListener("submit", addService);
   document.querySelector("#addon-form")?.addEventListener("submit", addAddon);
@@ -217,9 +381,41 @@ function bind() {
   document.querySelectorAll("[data-seat]").forEach((button) => button.addEventListener("click", () => seatWalkin(button.dataset.seat)));
   document.querySelectorAll("[data-queue-seat]").forEach((button) => button.addEventListener("click", () => updateQueueStatus(button.dataset.queueSeat)));
   document.querySelectorAll("[data-check]").forEach((button) => button.addEventListener("click", () => checkAppointment(button.dataset.check)));
+  document.querySelectorAll("[data-reschedule]").forEach((button) => button.addEventListener("click", () => openReschedule(button.dataset.reschedule)));
+  document.querySelectorAll("[data-reschedule-form]").forEach((form) => {
+    form.addEventListener("submit", submitReschedule);
+    form.querySelector("[name='date']")?.addEventListener("change", () => updateRescheduleBarbers(form));
+  });
+  document.querySelectorAll("[data-calendar-date]").forEach((button) => button.addEventListener("click", () => chooseRescheduleDate(button)));
+  document.querySelectorAll("[data-reschedule-cancel]").forEach((button) => button.addEventListener("click", () => { rescheduleOpenId = ""; render(); }));
   document.querySelectorAll("[data-remove]").forEach((button) => button.addEventListener("click", () => removeItem(button.dataset.remove)));
   document.querySelectorAll("[data-toggle]").forEach((button) => button.addEventListener("click", () => toggleBarber(button.dataset.toggle)));
+  document.querySelectorAll("[data-barber-mode]").forEach((select) => select.addEventListener("change", () => setBarberMode(select.dataset.barberMode, select.value)));
+  document.querySelectorAll("[data-notification-read]").forEach((button) => button.addEventListener("click", () => markNotificationRead(button.dataset.notificationRead)));
   document.querySelectorAll("[data-field]").forEach((input) => input.addEventListener("change", () => editField(input.dataset.field, input.value)));
+}
+
+function bindLogin() {
+  document.querySelector("#login-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = values(event.currentTarget);
+    try {
+      const result = await api("/auth/login", { method: "POST", body: JSON.stringify({ username: form.username, password: form.password }) });
+      authToken = result.token;
+      localStorage.setItem("prostyleAdminToken", authToken);
+      render();
+    } catch {
+      document.querySelector("#app").innerHTML = loginScreen("That username or password did not work.");
+      bindLogin();
+    }
+  });
+}
+
+async function logout() {
+  await api("/auth/logout", { method: "POST" }).catch(() => {});
+  authToken = "";
+  localStorage.removeItem("prostyleAdminToken");
+  render();
 }
 
 async function addService(event) {
@@ -241,7 +437,7 @@ async function addAddon(event) {
 async function addBarber(event) {
   event.preventDefault();
   const form = values(event.currentTarget);
-  state.barbers.push({ id: id("b"), name: form.name, active: true });
+  state.barbers.push({ id: id("b"), name: form.name, active: true, unavailableMode: "active", unavailableFrom: "", unavailableTo: "", unavailableReason: "" });
   await save();
   render();
 }
@@ -270,6 +466,67 @@ async function checkAppointment(itemId) {
   render();
 }
 
+function openReschedule(itemId) {
+  rescheduleOpenId = rescheduleOpenId === itemId ? "" : itemId;
+  render();
+}
+
+function chooseRescheduleDate(button) {
+  const form = button.closest("[data-reschedule-form]");
+  if (!form) return;
+  form.querySelectorAll("[data-calendar-date]").forEach((item) => item.classList.remove("active"));
+  button.classList.add("active");
+  form.elements.date.value = button.dataset.calendarDate;
+  updateRescheduleBarbers(form);
+}
+
+function updateRescheduleBarbers(form) {
+  const selected = form.elements.barberId.value;
+  form.elements.barberId.innerHTML = barberOptionsForDate(form.elements.date.value, selected);
+}
+
+async function submitReschedule(event) {
+  event.preventDefault();
+  const itemId = event.currentTarget.dataset.rescheduleForm;
+  const item = state.appointments.find((appointment) => appointment.id === itemId);
+  if (!item) return;
+
+  const form = values(event.currentTarget);
+  if (!state.barbers.some((barber) => barber.id === form.barberId && isBarberAvailableForDate(barber, form.date))) {
+    alert("That barber is not available for the selected date.");
+    return;
+  }
+
+  item.date = form.date;
+  item.dateLabel = dateLabelFromKey(form.date);
+  item.time = form.time;
+  item.barberId = form.barberId;
+  item.status = "Booked";
+  item.checkedInAt = undefined;
+
+  state.notifications ||= [];
+  state.notifications.unshift({
+    id: id("n"),
+    kind: "reschedule",
+    message: `${item.name} was rescheduled to ${item.dateLabel} at ${item.time} with ${barberById(item.barberId).name}.`,
+    relatedId: item.id,
+    read: false,
+    createdAt: Date.now()
+  });
+
+  rescheduleOpenId = "";
+  await save();
+  render();
+}
+
+function isBarberAvailableForDate(barber, dateKey) {
+  if (!barber || barber.active === false || barber.unavailableMode === "indefinite") return false;
+  if (barber.unavailableMode !== "range") return true;
+  const from = barber.unavailableFrom || "0000-01-01";
+  const to = barber.unavailableTo || "9999-12-31";
+  return !(dateKey >= from && dateKey <= to);
+}
+
 async function removeItem(descriptor) {
   const [collection, itemId] = descriptor.split(":");
   state[collection] = state[collection].filter((item) => item.id !== itemId);
@@ -279,7 +536,37 @@ async function removeItem(descriptor) {
 
 async function toggleBarber(itemId) {
   const item = state.barbers.find((barber) => barber.id === itemId);
-  item.active = !item.active;
+  setBarberAvailability(item, item.active ? "indefinite" : "active");
+  await save();
+  render();
+}
+
+async function setBarberMode(itemId, mode) {
+  const item = state.barbers.find((barber) => barber.id === itemId);
+  if (!item) return;
+  setBarberAvailability(item, mode);
+  await save();
+  render();
+}
+
+function setBarberAvailability(item, mode) {
+  item.unavailableMode = mode;
+  item.active = mode === "active";
+  if (mode === "active") {
+    item.unavailableFrom = "";
+    item.unavailableTo = "";
+  }
+  if (mode === "range") {
+    item.active = true;
+    item.unavailableFrom ||= new Date().toISOString().slice(0, 10);
+    item.unavailableTo ||= item.unavailableFrom;
+  }
+}
+
+async function markNotificationRead(itemId) {
+  const item = (state.notifications || []).find((notification) => notification.id === itemId);
+  if (!item) return;
+  item.read = true;
   await save();
   render();
 }
